@@ -2,6 +2,7 @@ from ndex2.nice_cx_network import NiceCXNetwork
 from lxml import etree as ET
 import os
 import ndex2
+import pprint
 
 # import ndex2.client as nc
 # import networkx as nx
@@ -16,17 +17,54 @@ NDEX_USER = os.environ["NDEX_USER"]
 NDEX_PWD = os.environ["NDEX_PWD"]
 
 entities_by_id = dict()
+group_id_to_entity_id = dict()
+group_contents_by_group_id = dict()
 dummy_entities = list()
 
 # read gpml file
-gpml_file = "WP289_102527.gpml"
 # gpml_file = "sample.gpml"
+gpml_file = "complex.gpml"
+# gpml_file = "WP289_102527.gpml"
 dom = ET.parse(gpml_file)
 
 cx_network = NiceCXNetwork()
 gpml_pathway = dom.getroot()
 cx_network.set_name(gpml_pathway.get("Name"))
 cartesianLayout = []
+
+
+class GraphIdManager:
+    """
+    Based on this code in JS:
+    https://github.com/wikipathways/gpml2pvjson-js/blob/91820459b2fa885406d4f2e6a8059ac43e80fa62/src/GraphIdManager.ts
+    Generates a new graph_id
+    """
+
+    def __init__(self):
+        self.incrementing_value_as_int = int("0xa00", base=16)
+        self.namespace = "gpml2cxgeneratedid"
+
+    def generate_and_record(self):
+        """
+        Generate a new GraphId (one not found in the source GPML)
+        """
+        self.incrementing_value_as_int += 1
+        # NOTE: the namespace is not part of incrementing_value_as_int
+        return self.namespace + hex(self.incrementing_value_as_int)
+
+
+#    def record_existing(self, graph_id_as_hex):
+#        """
+#        Recognize the existence of a GraphId found in the source GPML.
+#        TODO: what's the point of this? Since we're using a namespace,
+#        why increment for other namespaces?
+#        """
+#        incrementing_value_as_int = self.incrementing_value_as_int
+#        graph_id_as_int = int(graph_id_as_hex, base=16)
+#        # NOTE: this graphIdAsInt does not refer to exactly the same thing as PathVisio's
+#        # IncrementingValue, because it's the sum of RandomValue and IncrementingValue.
+#        if graph_id_as_int > incrementing_value_as_int:
+#            self.incrementing_value_as_int = graph_id_as_int
 
 
 def set_cartesian_layout_aspect(self, cartesian_layout_aspect):
@@ -117,10 +155,27 @@ def get_numeric_coordinate(s):
     return result
 
 
+def add_cx_entity_from_gpml(self, gpml_entity):
+    graph_id = gpml_entity.get("GraphId")
+    group_ref = gpml_entity.get("GroupRef")
+    if group_ref is not None:
+        self.add_node_attribute(
+            property_of=cx_node, name="GroupRef", values=group_ref, subnetwork=group_ref
+        )
+        if group_ref not in group_contents_by_group_id:
+            group_contents_by_group_id[group_ref] = []
+            group_contents_by_group_id[group_ref].append(graph_id)
+
+
 def add_cx_node_from_gpml(self, gpml_node):
+    add_cx_entity_from_gpml(self, gpml_node)
     graph_id = gpml_node.get("GraphId")
     cx_node = self.create_node(node_name=graph_id)
     entities_by_id[graph_id] = cx_node
+
+    #    group_ref = gpml_node.get("GroupRef")
+    #    if group_ref is not None:
+    #        self.add_node_attribute(property_of=cx_node, name="GroupRef", values=group_ref, subnetwork=group_ref)
 
     # TODO: some GPML elements have default ShapeType of Rectangle, but
     # the default Shape for CX is Ellipse.
@@ -161,6 +216,7 @@ def add_anchors(self, gpml_edge):
 
 
 def add_cx_edge_from_gpml(self, gpml_edge):
+    add_cx_entity_from_gpml(self, gpml_edge)
     # graph_id = gpml_edge.get("GraphId")
     # edge_attributes = dict()
     for graphics in gpml_edge.findall("ns3:Graphics", NAMESPACES):
@@ -191,6 +247,33 @@ def add_cx_edge_from_gpml(self, gpml_edge):
             self.add_edge_attribute(property_of=cx_edge, name=name, values=value)
 
 
+graph_id_manager = GraphIdManager()
+
+for gpml_node in dom.findall("ns3:Group", NAMESPACES):
+    # add_cx_node_from_gpml(cx_network, gpml_node)
+    group_id = gpml_node.get("GroupId")
+    graph_id = gpml_node.get("GraphId")
+    if graph_id is None:
+        graph_id = graph_id_manager.generate_and_record()
+    cx_node = cx_network.create_node(node_name=graph_id)
+    entities_by_id[graph_id] = cx_node
+    group_id_to_entity_id[group_id] = cx_node
+
+    # TODO: some GPML elements have default ShapeType of Rectangle, but
+    # the default Shape for CX is Ellipse.
+    cx_network.add_node_attribute(property_of=cx_node, name="Shape", values="Rectangle")
+
+    #    text_label = gpml_node.get("TextLabel")
+    #    if text_label:
+    #        cx_network.add_node_attribute(
+    #            property_of=cx_node, name="shared name", values=text_label
+    #        )
+    for name, value in sorted(gpml_node.items()):
+        kv = process_kv(name, value)
+        cx_network.add_node_attribute(
+            property_of=cx_node, name=kv["key"], values=kv["value"]
+        )
+
 for gpml_node in dom.findall("ns3:DataNode", NAMESPACES):
     add_cx_node_from_gpml(cx_network, gpml_node)
 
@@ -200,9 +283,6 @@ for gpml_node in dom.findall("ns3:Shape", NAMESPACES):
 for gpml_node in dom.findall("ns3:Label", NAMESPACES):
     add_cx_node_from_gpml(cx_network, gpml_node)
 
-for gpml_node in dom.findall("ns3:Group", NAMESPACES):
-    add_cx_node_from_gpml(cx_network, gpml_node)
-
 for gpml_edge in dom.findall("ns3:Interaction", NAMESPACES):
     add_anchors(cx_network, gpml_edge)
 
@@ -214,6 +294,32 @@ for gpml_edge in dom.findall("ns3:Interaction", NAMESPACES):
 
 for gpml_edge in dom.findall("ns3:GraphicalLine", NAMESPACES):
     add_cx_edge_from_gpml(cx_network, gpml_edge)
+
+for group_id, group_contents in group_contents_by_group_id.items():
+    cx_node = group_id_to_entity_id[group_id]
+    # TODO: calculate the actual values
+    min_x = 10
+    max_x = 100
+    min_y = 10
+    max_y = 100
+    min_z = 100
+
+    width = max_x - min_x
+    height = max_y - min_y
+
+    cartesianLayout.append(
+        {
+            "node": cx_node,
+            "x": get_numeric_coordinate(min_x),
+            "y": get_numeric_coordinate(min_y),
+            "z": get_numeric_coordinate(min_z),
+        }
+    )
+
+    # cx_network.add_node_attribute(property_of=cx_node, name="X", values=min_x)
+    # cx_network.add_node_attribute(property_of=cx_node, name="Y", values=min_y)
+    cx_network.add_node_attribute(property_of=cx_node, name="WIDTH", values=width)
+    cx_network.add_node_attribute(property_of=cx_node, name="HEIGHT", values=height)
 
 # TODO: need to handle defaults. The following doesn't appear to work.
 # node_properties = [
@@ -229,7 +335,8 @@ set_cartesian_layout_aspect(cx_network, cartesianLayout)
 cx_network.print_summary()
 
 mycx = cx_network.to_cx()
-print(mycx)
+# print(mycx)
+pprint.pprint(mycx, depth=4)
 
 # result = cx_network.upload_to(
 #    server="http://test.ndexbio.org", username=NDEX_USER, password=NDEX_PWD
@@ -242,4 +349,4 @@ result = cx_network.update_to(
     uuid="99698d91-9155-11e9-b7e4-0660b7976219",
 )
 
-print(result)
+pprint.pprint(result, depth=3)
